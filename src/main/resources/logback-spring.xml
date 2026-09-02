@@ -1,0 +1,12 @@
+<configuration>
+    <springProperty name="SERVICE_NAME" source="spring.application.name" defaultValue="ipie-user-service"/>
+    <property name="IPIE_ENVIRONMENT" value="${IPIE_ENVIRONMENT:-local}"/>
+
+    <!-- The JSON shape (fields, MDC keys included) is owned by common-observability - master
+         standards doc, 5.6 - so every service's logs look the same. -->
+    <include resource="META-INF/ipie/logback-json-console-appender.xml"/>
+
+    <root level="INFO">
+        <appender-ref ref="JSON_CONSOLE"/>
+    </root>
+</configuration>

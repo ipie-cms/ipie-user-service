@@ -1,0 +1,15 @@
+# UAT - deployed from the `uat` branch, for ipie-user-service.
+#
+#     SPRING_PROFILES_ACTIVE=deployed,uat
+#
+# The hardening shared by every deployed environment is in application-deployed.yml, which this
+# profile assumes is active alongside it. Only this environment's own differences belong here.
+#
+# Masked production-like data, exercised by business users rather than automated suites. The API
+# documentation stays reachable here on purpose: testers and integrating teams use it, and this is
+# the last environment where that is true.
+
+management:
+  tracing:
+    sampling:
+      probability: ${IPIE_TRACING_SAMPLING_PROBABILITY:0.3}

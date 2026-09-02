@@ -1,0 +1,14 @@
+# SIT / TEST - deployed from the `test` branch, for ipie-user-service.
+#
+#     SPRING_PROFILES_ACTIVE=deployed,sit
+#
+# The hardening shared by every deployed environment is in application-deployed.yml, which this
+# profile assumes is active alongside it. Only this environment's own differences belong here.
+#
+# Synthetic data. This is where automated suites run against a full stack, so sampling is high
+# enough to investigate a failing run without keeping every trace of every retry.
+
+management:
+  tracing:
+    sampling:
+      probability: ${IPIE_TRACING_SAMPLING_PROBABILITY:0.5}

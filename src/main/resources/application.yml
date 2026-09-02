@@ -1,0 +1,408 @@
+# This service is secured by default (see ipie.security below and common-security). No
+# spring.security.oauth2.resourceserver.jwt.issuer-uri/jwk-set-uri is set here on purpose: real
+# environments MUST supply one (pointing at Keycloak, e.g. https://keycloak.example.com/realms/ipie)
+# via SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI - startup fails loudly without it
+# rather than silently accepting unauthenticated traffic (master standards doc, 14: "Fail startup
+# when mandatory secure configuration is missing"). See application-local.yml for local dev only.
+spring:
+  application:
+    name: ipie-user-service
+
+  autoconfigure:
+    # Spring Boot's own Elasticsearch repository auto-configuration is NOT conditional on
+    # spring.elasticsearch.uris - merely having spring-boot-starter-data-elasticsearch on the
+    # classpath (kept so this service *can* opt into Elasticsearch search later, see
+    # UserSearchIndexConfig) is enough for it to eagerly build UserDocumentRepository and check
+    # index existence at startup, defaulting to localhost:9200 when unconfigured - which fails
+    # with Connection refused inside a container where nothing listens there. Same class of bug
+    # already solved for the Kafka/RabbitMQ consumers (see UserEventLogConsumer's Javadoc):
+    # classpath presence, not configuration, is what triggers Boot's auto-configuration.
+    # UserSearchIndexConfig.ElasticsearchRepositoryEnabler and .elasticsearchHealthIndicator
+    # re-enable the repository and the /actuator/health entry manually, both gated by the same
+    # spring.elasticsearch.uris property, so both come back automatically if Elasticsearch is
+    # ever actually configured for this service - nothing here is a permanent removal.
+    exclude:
+      # Spring Boot ships separate blocking and reactive auto-configuration classes for both
+      # Elasticsearch repositories and health indicators - UserDocumentRepository extends the
+      # blocking ElasticsearchRepository, so none of these four are needed unconditionally; all
+      # four fire merely because spring-boot-starter-data-elasticsearch is on the classpath,
+      # regardless of whether spring.elasticsearch.uris is actually set (verified: excluding only
+      # the blocking pair left the reactive pair still active - "Bootstrapping Spring Data
+      # Reactive Elasticsearch repositories" in the log despite nothing needing it - and excluding
+      # only the reactive health indicator left the blocking one (ElasticsearchRestClientHealthIndicator)
+      # still failing /actuator/health with Connection refused).
+      - org.springframework.boot.autoconfigure.data.elasticsearch.ElasticsearchRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.elasticsearch.ReactiveElasticsearchRepositoriesAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.data.elasticsearch.ElasticsearchReactiveHealthContributorAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.elasticsearch.ElasticsearchRestHealthContributorAutoConfiguration
+
+  datasource:
+    # Was ipie/ipie (the Dockerized postgres service's creds, see docker-compose.yml). Pointed at
+    # local Postgres instead, using its default postgres/postgres superuser account.
+    # url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/ipie_user_service}
+    # username: ${SPRING_DATASOURCE_USERNAME:ipie}
+    # password: ${SPRING_DATASOURCE_PASSWORD:ipie}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/ipie_user_service}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema - Hibernate only ever validates it matches (master standards doc,
+      # 7.1: "Do not use Hibernate ddl-auto=update in controlled environments").
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    # D6 puts ipie-user-service and ipie-iam-service in one database and one schema, each with its
+    # own history table. Whichever starts first creates its tables there, so the second one finds a
+    # non-empty schema with no history table of its own and refuses outright:
+    #
+    #   "Found non-empty schema(s) public but no schema history table"
+    #
+    # It is a startup-order race that only appears against a freshly created database, which is why
+    # it stayed hidden until one was rebuilt. Baselining on migrate tells Flyway to record a
+    # starting point instead of refusing.
+    #
+    # baseline-version MUST be 0. It defaults to 1, which would mark V1 as already applied and skip
+    # the baseline schema entirely - the service would then start against tables that were never
+    # created, and fail later and less clearly.
+    baseline-on-migrate: true
+    baseline-version: 0
+    # Migrations connect as the OWNER role, the running application as the APP role (Stage 5, item
+    # 1). Separating them is what makes least privilege mean anything: a runtime connection that
+    # could create a table could also drop the grants that constrain it. Flyway reuses
+    # spring.datasource.url and only swaps the credentials.
+    #
+    # Both default to the datasource's own credentials, so a developer running against `postgres`
+    # needs no extra configuration and sees no behaviour change. Deployed environments set all four.
+    # The fallback resolves the datasource's own PROPERTY, not the environment variable behind it.
+    # Referencing SPRING_DATASOURCE_USERNAME here meant that anything setting the credentials another
+    # way - a test's dynamic properties, a config server, a properties file - left Flyway falling
+    # back to a literal postgres/postgres, which fails to authenticate or, worse, succeeds as a
+    # superuser and undoes the separation this exists to create.
+    user: ${SPRING_FLYWAY_USER:${spring.datasource.username}}
+    password: ${SPRING_FLYWAY_PASSWORD:${spring.datasource.password}}
+
+  security:
+    oauth2:
+      client:
+        registration:
+          # This service's own Keycloak client (serviceAccountsEnabled=true), used only for the
+          # client-credentials grant behind KeycloakUserManagementClient - see
+          # deploy/keycloak/realm-export.json for its serviceAccountClientRoles grant (manage-users).
+          keycloak-admin:
+            client-id: ${IPIE_KEYCLOAK_CLIENT_ID:ipie-user-service}
+            client-secret: ${IPIE_KEYCLOAK_CLIENT_SECRET:ipie-user-service-secret}
+            authorization-grant-type: client_credentials
+        provider:
+          keycloak-admin:
+            token-uri: ${IPIE_KEYCLOAK_BASE_URL:http://localhost:8080}/realms/${IPIE_KEYCLOAK_REALM:ipie}/protocol/openid-connect/token
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # "prometheus" here is unrelated to and does not affect "metrics"/tracing below - it just
+        # exposes the /actuator/prometheus scrape endpoint that common-observability's
+        # micrometer-registry-prometheus dependency wires in automatically (master standards doc,
+        # 5.6). See docker-compose.yml's prometheus service for the scrape config that reads it.
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  health:
+    # Both spring-kafka and spring-boot-starter-amqp are always on the classpath (this service can
+    # be configured for either broker - see EventPublisherConfig), so Spring Boot auto-registers
+    # health indicators for BOTH regardless of which one is actually active. Whichever broker
+    # ISN'T configured has no spring.kafka.bootstrap-servers/spring.rabbitmq.host set, so its
+    # indicator checks Spring Boot's own default target (localhost:9092/localhost:5672) - nothing
+    # is listening there inside the container, so it always reports DOWN and drags overall
+    # /actuator/health DOWN even when the service and its actually-configured broker are fine.
+    # Disabled here; re-enable only the one matching whichever broker this deployment actually
+    # uses if you want real broker-connectivity health monitoring.
+    kafka:
+      enabled: false
+    rabbit:
+      enabled: false
+    # spring-boot-starter-data-redis (via common-cache) is always on the classpath too, so Spring
+    # Boot auto-registers a Redis health indicator the same way it does for Kafka/RabbitMQ above -
+    # purely from classpath presence, not from whether spring.data.redis.host is actually set.
+    # Caching has a safe "do nothing" fallback (IpieCacheAutoConfiguration's no-op CacheManager),
+    # so an unreachable/unconfigured Redis should never drag overall service health down; disabled
+    # here for the same reason as kafka/rabbit above.
+    redis:
+      enabled: false
+  tracing:
+    sampling:
+      # 100% here so the reference template's traces are always visible; real services should
+      # sample far lower (e.g. 0.1) once traffic volume makes full sampling expensive.
+      probability: ${IPIE_TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      # Jaeger's all-in-one image exposes an OTLP/HTTP receiver on 4318 (see docker-compose.yml's
+      # jaeger service); set to http://jaeger:4318/v1/traces inside Compose via IPIE_OTLP_ENDPOINT.
+      endpoint: ${IPIE_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+ipie:
+  openapi:
+    # Title comes from spring.application.name; only this sentence is the service's
+    # own. It used to be a copied class, which is how every service ended up serving
+    # the template's description as its public API summary.
+    description: "user service API"
+  security:
+    enabled: true
+    permissions-claim: permissions
+    # Empty by default (no cross-origin access); set via IPIE_CORS_ALLOWED_ORIGINS for a browser
+    # frontend, e.g. http://localhost:5173 for the ipie-web local dev server.
+    cors-allowed-origins: ${IPIE_CORS_ALLOWED_ORIGINS:}
+    # Extends (not replaces conceptually, but YAML binding does replace the Java-side default
+    # list, so every default path is repeated here too) IpieSecurityProperties' own defaults with
+    # the self-registration endpoints - these are deliberately unauthenticated, see
+    # RegistrationController's Javadoc.
+    public-paths:
+      - /actuator/health/**
+      - /actuator/info
+      - /actuator/prometheus
+      - /v3/api-docs/**
+      - /swagger-ui/**
+      - /swagger-ui.html
+      - /api/v1/registrations/**
+      - /api/v1/users/verify
+      # A plain browser redirect target the pillar's own IdP lands on after
+      # authenticating the user - see PillarLinkController#callback's Javadoc.
+      - /api/v1/pillar-links/callback
+    keycloak:
+      user-management:
+        # Disabled: Keycloak account provisioning moved to ipie-iam-service's
+        # AccountProvisioningController (called via InterServiceClient below) - this service no
+        # longer talks to Keycloak's admin API directly for user management. The
+        # spring.security.oauth2.client.registration.keycloak-admin entry above stays, since
+        # ipie.client.security below now authenticates the InterServiceClient call with it
+        # instead.
+        enabled: false
+        base-url: ${IPIE_KEYCLOAK_BASE_URL:http://localhost:8080}
+        realm: ${IPIE_KEYCLOAK_REALM:ipie}
+        registration-id: keycloak-admin
+    # HMAC request signing. user-to-iam is the *signing* side of an outbound call - the verifying
+    # side is ipie-iam-service's, configured there (see ipie.client.security.hmac-signing-* below,
+    # which is what actually signs outbound calls with this same secret). spi-to-user is the
+    # *verifying* side of this service's own one high-sensitivity, service-to-service only inbound
+    # endpoint (see SecurityConfig's Javadoc and ipie-iam-service's matching ipie.security.hmac
+    # block for the same pattern) - additive defense in depth on top of the OAuth2 bearer token +
+    # @RequiresPermission already gating that path. No safe default for a real shared secret -
+    # both must be set.
+    # Pepper for the two short-lived registration secrets - the pillar-admin approval token
+    # and the registration email OTP. Both are stored as a peppered HMAC and never in clear text
+    # (RegistrationSecretHasher; ARCHITECTURE_WORKING_PLAN.md Stage 5, item 2; DPDP s.8(5)).
+    #
+    # The value below is a LOCAL DEVELOPMENT value and is deliberately obvious about it. The prod
+    # profile requires the environment to supply a real one and fails startup otherwise, because a
+    # known pepper is no pepper: a six-digit OTP hashed under it is recovered by trying a million
+    # candidates.
+    #
+    # Changing it invalidates every token and OTP already issued - they hash to something else and
+    # simply stop matching. That is a re-request for the user, not data loss.
+    registration-secret-pepper: ${IPIE_SECURITY_REGISTRATION_SECRET_PEPPER:local-dev-registration-pepper-not-for-any-real-environment}
+    hmac:
+      keys:
+        user-to-iam: ${IPIE_SECURITY_HMAC_KEY_USER_TO_IAM:}
+        spi-to-user: ${IPIE_SECURITY_HMAC_KEY_SPI_TO_USER:}
+      protected-paths:
+        - /internal/logins/notify
+    # Redis-backed (RateLimitFilter, wired in this service's own SecurityConfig - see
+    # ResourceServerAutoConfiguration#configureBaseline's Javadoc for why a custom
+    # SecurityFilterChain is the only way to add an opt-in filter like this one) protection for
+    # the public, unauthenticated endpoints listed in public-paths above - this platform's own
+    # SRS (docs/SRS_Pillar_SSO_Federation.docx, NFR-6) already flagged this as Pending.
+    rate-limit:
+      # Order matters: RateLimitFilter takes the FIRST rule whose pattern matches, so anything more
+      # specific has to be listed above the pattern that would otherwise swallow it.
+      rules:
+        # Organisation lookup during registration - a read a user repeats while typing a company
+        # name, so it cannot share the write flow's budget below. Under that budget a user
+        # searching for their employer exhausts the limit before they can register at all.
+        - pattern: /api/v1/registrations/organisations/search
+          limit: ${IPIE_RATE_LIMIT_ORG_SEARCH_LIMIT:60}
+          window: ${IPIE_RATE_LIMIT_ORG_SEARCH_WINDOW:PT1M}
+        # The four reference-data lists the registration form fetches when it loads. They sit under
+        # /api/v1/registrations only because that is where the wizard's endpoints live; they are
+        # public, cacheable, read-only lookups and share nothing with the write flow but a prefix.
+        #
+        # LEAVING THEM ON THE WRITE BUDGET MAKES REGISTRATION IMPOSSIBLE. The form issues all four on
+        # page load, which is 4 of the 5 calls allowed per minute; create, request OTP, confirm OTP
+        # and complete then need four more, so a registrant with a working connection is refused
+        # partway through - and a reload costs another four. Found by the end-to-end run, where
+        # `complete` came back 429 with nothing wrong on the registration path at all.
+        - pattern: /api/v1/registrations/professional-roles
+          limit: &lookup-limit ${IPIE_RATE_LIMIT_REGISTRATION_LOOKUPS_LIMIT:60}
+          window: &lookup-window ${IPIE_RATE_LIMIT_REGISTRATION_LOOKUPS_WINDOW:PT1M}
+        - pattern: /api/v1/registrations/legal-representative-types
+          limit: *lookup-limit
+          window: *lookup-window
+        - pattern: /api/v1/registrations/professional-identification-types
+          limit: *lookup-limit
+          window: *lookup-window
+        - pattern: /api/v1/registrations/identity-proof-types
+          limit: *lookup-limit
+          window: *lookup-window
+        # The registration write flow: create, request OTP, confirm OTP, complete. That is four
+        # calls per registration, so this limit is roughly "one registration per minute" per
+        # caller, not five.
+        - pattern: /api/v1/registrations/**
+          limit: ${IPIE_RATE_LIMIT_REGISTRATIONS_LIMIT:5}
+          window: ${IPIE_RATE_LIMIT_REGISTRATIONS_WINDOW:PT1M}
+        - pattern: /api/v1/users/verify
+          limit: ${IPIE_RATE_LIMIT_VERIFY_LIMIT:10}
+          window: ${IPIE_RATE_LIMIT_VERIFY_WINDOW:PT1M}
+        - pattern: /api/v1/pillar-links/callback
+          limit: ${IPIE_RATE_LIMIT_STAKEHOLDER_CALLBACK_LIMIT:20}
+          window: ${IPIE_RATE_LIMIT_STAKEHOLDER_CALLBACK_WINDOW:PT1M}
+  client:
+    security:
+      # Authenticates every outbound InterServiceClient call (e.g. to ipie-iam-service's
+      # /internal/accounts) as this service's own Keycloak client - the same client-credentials
+      # registration KeycloakUserManagementClient used to use directly, above.
+      registration-id: keycloak-admin
+      # Additive on top of the client-credentials auth above - proves to ipie-iam-service that
+      # this specific call body genuinely came from this service, not just from something holding
+      # a valid bearer token (defense in depth - see HmacSigningInterceptor's Javadoc). Verified
+      # by ipie-iam-service's own HmacSignatureVerificationFilter against the matching
+      # ipie.security.hmac.keys.user-to-iam entry there.
+      hmac-signing-enabled: ${IPIE_CLIENT_SECURITY_HMAC_SIGNING_ENABLED:true}
+      hmac-signing-key-id: user-to-iam
+  idempotency:
+    ttl: ${IPIE_IDEMPOTENCY_TTL:PT24H}
+  registration:
+    # Email OTP lifetime. Was a hard-coded 10-minute constant in UserServiceImpl until 2026-08-13.
+    email-otp-ttl: ${IPIE_REGISTRATION_EMAIL_OTP_TTL:PT10M}
+    # Guesses allowed against ONE code before it is discarded. On exhaustion the code is thrown
+    # away rather than the account being locked: a timed lockout here would let anyone who can
+    # reach the endpoint deny service to a legitimate registrant at will.
+    email-otp-max-attempts: ${IPIE_REGISTRATION_EMAIL_OTP_MAX_ATTEMPTS:5}
+    # Codes ever issued for one registration. This is the cap that actually bounds a guessing
+    # attack - a per-code limit alone is escaped by asking for another code. 5 x 5 = at most 25
+    # guesses against 10^6 possibilities before the registration needs a human.
+    email-otp-max-resends: ${IPIE_REGISTRATION_EMAIL_OTP_MAX_RESENDS:5}
+    # How long the pillar-admin verification link stays valid after step 2 of
+    # self-registration - RegistrationService.completeRegistration.
+    verification-token-ttl: ${IPIE_REGISTRATION_VERIFICATION_TOKEN_TTL:PT48H}
+  web:
+    # Where PillarLinkController#callback 302-redirects the browser after the explicit
+    # pillar-linking handshake completes (or fails) - the ipie-web dev server by default.
+    base-url: ${IPIE_WEB_BASE_URL:http://localhost:5173}
+  pillar:
+    linking:
+      # How long an initiated pillar-link request (PillarLinkService#initiateLink) stays
+      # valid before the browser must have completed the redirect round trip.
+      request-ttl: ${IPIE_PILLAR_LINKING_REQUEST_TTL:PT10M}
+      providers:
+        # IBBI/NCLT/NCLAT/MCA/NeSL are each wired up against a mock realm
+        # (deploy/keycloak/mock-<agency>-realm.json), used to prove this feature end-to-end
+        # locally - see mock-ibbi-realm.json's header comment for the shape most of these follow.
+        # NCLAT is the one exception: it shares NCLT's own mock realm/instance rather than getting
+        # a separate one (see the nclat entry below) since the two tribunals are administratively
+        # related enough to plausibly share a real identity system - two distinct PillarType
+        # links, one underlying IdP.
+        ibbi:
+          authorization-url: ${IPIE_PILLAR_IBBI_AUTHORIZATION_URL:http://localhost:9091/realms/ibbi-mock/protocol/openid-connect/auth}
+          token-url: ${IPIE_PILLAR_IBBI_TOKEN_URL:http://localhost:9091/realms/ibbi-mock/protocol/openid-connect/token}
+          client-id: ${IPIE_PILLAR_IBBI_CLIENT_ID:ipie-account-linker}
+          client-secret: ${IPIE_PILLAR_IBBI_CLIENT_SECRET:ipie-account-linker-secret}
+          redirect-uri: ${IPIE_PILLAR_IBBI_REDIRECT_URI:http://localhost:8092/api/v1/pillar-links/callback}
+          # Write-back credentials (PillarIdpAdminClient) - a *different*, admin-scoped
+          # client than client-id/client-secret above. admin-base-url/admin-realm default to the
+          # OIDC fields' own host/realm when unset (see Provider#getAdminBaseUrl) - only shown
+          # explicitly here for visibility, same reasoning as SPRING_DATASOURCE_URL elsewhere.
+          admin-base-url: ${IPIE_PILLAR_IBBI_ADMIN_BASE_URL:http://localhost:9091}
+          admin-realm: ${IPIE_PILLAR_IBBI_ADMIN_REALM:ibbi-mock}
+          admin-client-id: ${IPIE_PILLAR_IBBI_ADMIN_CLIENT_ID:ipie-admin-writeback}
+          admin-client-secret: ${IPIE_PILLAR_IBBI_ADMIN_CLIENT_SECRET:ipie-admin-writeback-secret}
+        nclt:
+          authorization-url: ${IPIE_PILLAR_NCLT_AUTHORIZATION_URL:http://localhost:9092/realms/nclt-mock/protocol/openid-connect/auth}
+          token-url: ${IPIE_PILLAR_NCLT_TOKEN_URL:http://localhost:9092/realms/nclt-mock/protocol/openid-connect/token}
+          client-id: ${IPIE_PILLAR_NCLT_CLIENT_ID:ipie-account-linker}
+          client-secret: ${IPIE_PILLAR_NCLT_CLIENT_SECRET:ipie-account-linker-secret}
+          redirect-uri: ${IPIE_PILLAR_NCLT_REDIRECT_URI:http://localhost:8092/api/v1/pillar-links/callback}
+          admin-base-url: ${IPIE_PILLAR_NCLT_ADMIN_BASE_URL:http://localhost:9092}
+          admin-realm: ${IPIE_PILLAR_NCLT_ADMIN_REALM:nclt-mock}
+          admin-client-id: ${IPIE_PILLAR_NCLT_ADMIN_CLIENT_ID:ipie-admin-writeback}
+          admin-client-secret: ${IPIE_PILLAR_NCLT_ADMIN_CLIENT_SECRET:ipie-admin-writeback-secret}
+        # NCLAT (the appellate tribunal above NCLT) shares NCLT's own mock realm/instance - same
+        # host/port/realm as nclt above, deliberately: they're two distinct PillarType links
+        # (a user's NCLT and NCLAT identities are tracked separately), not two Keycloak instances.
+        nclat:
+          authorization-url: ${IPIE_PILLAR_NCLAT_AUTHORIZATION_URL:http://localhost:9092/realms/nclt-mock/protocol/openid-connect/auth}
+          token-url: ${IPIE_PILLAR_NCLAT_TOKEN_URL:http://localhost:9092/realms/nclt-mock/protocol/openid-connect/token}
+          client-id: ${IPIE_PILLAR_NCLAT_CLIENT_ID:ipie-account-linker}
+          client-secret: ${IPIE_PILLAR_NCLAT_CLIENT_SECRET:ipie-account-linker-secret}
+          redirect-uri: ${IPIE_PILLAR_NCLAT_REDIRECT_URI:http://localhost:8092/api/v1/pillar-links/callback}
+          admin-base-url: ${IPIE_PILLAR_NCLAT_ADMIN_BASE_URL:http://localhost:9092}
+          admin-realm: ${IPIE_PILLAR_NCLAT_ADMIN_REALM:nclt-mock}
+          admin-client-id: ${IPIE_PILLAR_NCLAT_ADMIN_CLIENT_ID:ipie-admin-writeback}
+          admin-client-secret: ${IPIE_PILLAR_NCLAT_ADMIN_CLIENT_SECRET:ipie-admin-writeback-secret}
+        mca:
+          authorization-url: ${IPIE_PILLAR_MCA_AUTHORIZATION_URL:http://localhost:9093/realms/mca-mock/protocol/openid-connect/auth}
+          token-url: ${IPIE_PILLAR_MCA_TOKEN_URL:http://localhost:9093/realms/mca-mock/protocol/openid-connect/token}
+          client-id: ${IPIE_PILLAR_MCA_CLIENT_ID:ipie-account-linker}
+          client-secret: ${IPIE_PILLAR_MCA_CLIENT_SECRET:ipie-account-linker-secret}
+          redirect-uri: ${IPIE_PILLAR_MCA_REDIRECT_URI:http://localhost:8092/api/v1/pillar-links/callback}
+          admin-base-url: ${IPIE_PILLAR_MCA_ADMIN_BASE_URL:http://localhost:9093}
+          admin-realm: ${IPIE_PILLAR_MCA_ADMIN_REALM:mca-mock}
+          admin-client-id: ${IPIE_PILLAR_MCA_ADMIN_CLIENT_ID:ipie-admin-writeback}
+          admin-client-secret: ${IPIE_PILLAR_MCA_ADMIN_CLIENT_SECRET:ipie-admin-writeback-secret}
+        nesl:
+          authorization-url: ${IPIE_PILLAR_NESL_AUTHORIZATION_URL:http://localhost:9094/realms/nesl-mock/protocol/openid-connect/auth}
+          token-url: ${IPIE_PILLAR_NESL_TOKEN_URL:http://localhost:9094/realms/nesl-mock/protocol/openid-connect/token}
+          client-id: ${IPIE_PILLAR_NESL_CLIENT_ID:ipie-account-linker}
+          client-secret: ${IPIE_PILLAR_NESL_CLIENT_SECRET:ipie-account-linker-secret}
+          redirect-uri: ${IPIE_PILLAR_NESL_REDIRECT_URI:http://localhost:8092/api/v1/pillar-links/callback}
+          admin-base-url: ${IPIE_PILLAR_NESL_ADMIN_BASE_URL:http://localhost:9094}
+          admin-realm: ${IPIE_PILLAR_NESL_ADMIN_REALM:nesl-mock}
+          admin-client-id: ${IPIE_PILLAR_NESL_ADMIN_CLIENT_ID:ipie-admin-writeback}
+          admin-client-secret: ${IPIE_PILLAR_NESL_ADMIN_CLIENT_SECRET:ipie-admin-writeback-secret}
+  events:
+    kafka:
+      # spring.kafka.bootstrap-servers is deliberately left unset here - EventPublisherConfig
+      # only activates KafkaEventPublisher when it's actually provided (e.g. via
+      # SPRING_KAFKA_BOOTSTRAP_SERVERS in docker-compose.yml); otherwise events fall back to the
+      # logging reference implementation, or to RabbitMQ below if that's configured instead.
+      topic: ${IPIE_EVENTS_KAFKA_TOPIC:ipie-user-service.events}
+    rabbitmq:
+      # spring.rabbitmq.host is deliberately left unset here too - only activates when Kafka
+      # isn't configured (see EventPublisherConfig's precedence: Kafka > RabbitMQ > logging), so
+      # the two never activate at the same time. Standby broker in case Kafka doesn't get
+      # organizational clearance - set SPRING_RABBITMQ_HOST to switch to it, no code change.
+      exchange: ${IPIE_EVENTS_RABBITMQ_EXCHANGE:ipie-user-service.events}
+      queue: ${IPIE_EVENTS_RABBITMQ_QUEUE:ipie-user-service.events.user-event-log}
+  cache:
+    # spring.data.redis.host is deliberately left unset here too, same reasoning as
+    # spring.kafka.bootstrap-servers above - IpieCacheAutoConfiguration only activates the
+    # Redis-backed CacheManager when it's actually provided (e.g. via SPRING_DATA_REDIS_HOST in
+    # docker-compose.yml); otherwise @Cacheable methods run uncached via the no-op fallback.
+    # default-ttl/ttls below are shown at their Java-level defaults for visibility - override
+    # per-cache-name via ipie.cache.ttls.<cache-name> (e.g. IPIE_CACHE_TTLS_USER-LOOKUP=PT1M).
+    default-ttl: ${IPIE_CACHE_DEFAULT_TTL:PT10M}
+    ttls:
+      # OrganisationRepositoryImpl#findByIdTypeAndIdValue - low write rate (an Organisation's
+      # id-type/id-value are immutable once created), safe to cache longer than the platform
+      # default.
+      organisations-by-id: ${IPIE_CACHE_TTLS_ORGANISATIONS_BY_ID:PT15M}
+

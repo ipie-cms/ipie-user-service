@@ -1,0 +1,26 @@
+# PPE - deployed from the `preprod` branch, for ipie-user-service.
+#
+#     SPRING_PROFILES_ACTIVE=deployed,preprod
+#
+# The hardening shared by every deployed environment is in application-deployed.yml, which this
+# profile assumes is active alongside it. Only this environment's own differences belong here.
+#
+# PPE EXISTS TO BE INDISTINGUISHABLE FROM PRODUCTION. Its purpose is to surface environment-specific
+# defects before go-live, and it can only do that while it is configured the same way - so this file
+# and application-prod.yml should stay identical in every control. Every line that differs is a
+# class of defect PPE can no longer catch. Anything added here needs a recorded reason; the
+# exception register in the Development Environment Configuration document, Appendix E, is where it
+# goes.
+
+management:
+  tracing:
+    sampling:
+      probability: ${IPIE_TRACING_SAMPLING_PROBABILITY:0.1}
+
+springdoc:
+  # The API contract is published to integrating teams through the documentation process, not by
+  # leaving a live schema endpoint exposed.
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
