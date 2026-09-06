@@ -1,0 +1,20 @@
+# DEV - deployed from the `develop` branch, for ipie-user-service.
+#
+#     SPRING_PROFILES_ACTIVE=deployed,dev
+#
+# The hardening shared by every deployed environment is in application-deployed.yml, which this
+# profile assumes is active alongside it. Only this environment's own differences belong here.
+#
+# Holds synthetic data only; production data is never copied here (Development Environment
+# Configuration, Section 43). It is the one deployed environment tuned for reading diagnostics
+# rather than for economy.
+
+management:
+  tracing:
+    sampling:
+      probability: ${IPIE_TRACING_SAMPLING_PROBABILITY:1.0}
+
+logging:
+  level:
+    # The environment where a developer is usually chasing something. INFO elsewhere.
+    in.gov.ipie: DEBUG

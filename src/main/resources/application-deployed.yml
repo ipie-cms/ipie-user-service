@@ -1,0 +1,66 @@
+# What is true of EVERY deployed environment - DEV, SIT, UAT, PPE and PROD alike - for
+# ipie-user-service (registration and the user record).
+#
+# Holds the personal data the platform is accountable for under the DPDP Act: registrations,
+# identity proofs, consent records. Every environment above local therefore runs with security
+# enabled and secrets supplied from outside this file.
+#
+# ACTIVATE IT ALONGSIDE THE ENVIRONMENT PROFILE, IN THIS ORDER:
+#
+#     SPRING_PROFILES_ACTIVE=deployed,prod
+#
+# Order matters and is not decoration. Spring applies profile-specific documents in the order the
+# profiles are listed, so the environment profile must come second to override anything here. A
+# manifest that sets SPRING_PROFILES_ACTIVE=prod alone gets application.yml's development-friendly
+# defaults with none of the hardening below.
+#
+# This file replaces the previous single application-prod.yml, which described itself as covering
+# "a real (DEV/SIT/UAT/PROD) environment". One profile for five environments meant every difference
+# between them had to be expressed as an environment variable, so no file said what UAT actually
+# differs from Production in - which is precisely the question a release review asks.
+#
+# SUPPLIED EXTERNALLY, NOT HERE - application.yml ships no default for any of these, so startup
+# fails when they are missing rather than running on a development value (master standards doc, 14):
+#   - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI - a real Keycloak realm
+#   - SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD - the managed Postgres instance
+#   - SPRING_FLYWAY_USER / _PASSWORD - the owner role that runs migrations
+#   - IPIE_CORS_ALLOWED_ORIGINS - the real frontend origin
+#   - IPIE_TRUSTED_PROXIES - without it every caller presents the gateway address and shares one
+#     rate-limit bucket
+#   - SPRING_RABBITMQ_HOST or SPRING_KAFKA_BOOTSTRAP_SERVERS
+#   - IPIE_SECURITY_REGISTRATION_SECRET_PEPPER - no default anywhere but local, deliberately: it is
+#     what makes a hashed six-digit OTP irreversible, and a value published in this repository would
+#     make every environment's tokens forgeable
+#   - IPIE_SECURITY_HMAC_KEY_USER_TO_IAM - signs this service's calls to ipie-iam-service
+
+spring:
+  jpa:
+    hibernate:
+      # Restated deliberately. Never update/create in a deployed environment: Flyway is the only
+      # thing allowed to change the schema (master standards doc, section 8).
+      ddl-auto: validate
+
+server:
+  error:
+    # An error response tells the caller what failed, never how the server is built.
+    include-message: never
+    include-stacktrace: never
+    include-exception: false
+
+management:
+  tracing:
+    sampling:
+      # A middle default. Each environment overrides it: verbose where traces are being read,
+      # sparse where traffic volume makes them expensive.
+      probability: ${IPIE_TRACING_SAMPLING_PROBABILITY:0.2}
+
+logging:
+  level:
+    in.gov.ipie: INFO
+
+ipie:
+  security:
+    # Never disabled outside a laptop - see application-local.yml's own warning.
+    enabled: true
+    # No default. An unresolvable placeholder fails startup, which is the point - see above.
+    registration-secret-pepper: ${IPIE_SECURITY_REGISTRATION_SECRET_PEPPER}

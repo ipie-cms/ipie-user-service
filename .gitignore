@@ -1,0 +1,75 @@
+Set-Content .gitignore @"
+# Build outputs
+build/
+out/
+bin/
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# JMeter results
+deploy/jmeter/results/
+
+
+# Word temp files
+~`$*
+"@
+*.docx
+*.md
+scaffold-services.ps1
+!README.md
+
+# The platform standards are tracked here - this repository is their source of truth, and each
+# extracted service carries a copy. The .md ONLY: it is the source, it diffs and greps in review,
+# and it is what a reviewer can actually read in a pull request. The .docx generated from it stays
+# on disk and out of git, with every other generated deliverable - a .docx is a zip, so its text is
+# compressed and nothing inside one can be audited by grep. Regenerate the .docx from the .md and
+# never the reverse; that discipline is what stopped the previous .docx falling three versions
+# behind, and it still applies now that only the source is version controlled.
+!MASTER_CODE_STANDARDS.md
+
+
+# The platform standards travel with every service - see MASTER_CODE_STANDARDS.md. Regenerate the
+# .docx from the .md rather than editing it, or the two drift and the .docx becomes the stale one.
+!MASTER_CODE_STANDARDS.md
+
+# The class reference is a handover document like the standards beside it, and the blanket *.md rule
+# above had been hiding it: every copy existed on disk, none was tracked, so an edit to it could
+# never reach a reviewer. Un-ignored by name for the same reason MASTER_CODE_STANDARDS.md is.
+!SERVICE_CLASS_REFERENCE.md
+
+# The docs folder is local-only in EVERY repository, this one included. It used to be tracked here -
+# this service's LLD, ERD and draw.io sources travelled with the code that implements them - and that
+# is now reversed deliberately.
+#
+# The reason is the .docx deliverables generated beside those sources. A .docx is a zip, so its text
+# is DEFLATE-compressed: a grep over the estate cannot see inside one, and a string that should never
+# have shipped can sit in a document every audit passes. One did. Ignoring the folder outright
+# removes the class of problem rather than re-auditing each file forever.
+#
+# The documents still live here on disk and are still updated alongside the code - they reach the
+# client by hand rather than through git. Anything that must reach a reviewer through the repository
+# belongs at the root, un-ignored by name, the way MASTER_CODE_STANDARDS.md is.
+#
+# This rule sits AFTER every negation above so it wins, and it matches ipie-platform-mca and
+# ipie-service-template, where /docs/ has always been ignored.
+/docs/
+
+# CONFIDENTIAL - never commit, in any repository. The governing RFP (GeM bid GEM/2025/B/6668497)
+# is a local-only document. This rule sits AFTER every negation above so it wins: docs/*.docx is
+# un-ignored in a service repository, which would otherwise let a copy dropped into docs/ be
+# committed by accident.
+*RFP*
+*rfp*.docx

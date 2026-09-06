@@ -1,0 +1,87 @@
+plugins {
+    id 'ipie.spring-service-conventions'
+}
+
+description = 'Approved starting structure for every iPIE backend microservice (master standards doc, section 3). ' +
+        'Ships with a full vertical slice - User CRUD against PostgreSQL - so the layering and cross-cutting ' +
+        'wiring are visible end to end. Copy this module to start a new service; keep the package/module rename ' +
+        'as the very first commit.'
+
+// Standalone service build. Every platform dependency below is a PUBLISHED artifact rather than a
+// project(':...') - the version comes from ipiePlatformVersion in gradle.properties.
+def ipiePlatform = providers.gradleProperty('ipiePlatformVersion').get()
+
+repositories {
+    mavenLocal()
+    maven {
+        name = 'ipiePlatform'
+        url = uri('https://maven.pkg.github.com/ipie-cms/ipie-platform-mca')
+        credentials {
+            username = providers.gradleProperty('ipie.packages.user')
+                    .orElse(providers.environmentVariable('GITHUB_ACTOR')).getOrElse('')
+            password = providers.gradleProperty('ipie.packages.token')
+                    .orElse(providers.environmentVariable('GITHUB_TOKEN')).getOrElse('')
+        }
+    }
+    mavenCentral()
+}
+
+dependencies {
+    implementation platform("in.gov.ipie:ipie-parent:${ipiePlatform}")
+    annotationProcessor platform("in.gov.ipie:ipie-parent:${ipiePlatform}")
+    testImplementation platform("in.gov.ipie:ipie-parent:${ipiePlatform}")
+    testAnnotationProcessor platform("in.gov.ipie:ipie-parent:${ipiePlatform}")
+
+    implementation "in.gov.ipie:ipie-common-libs:${ipiePlatform}"
+    // Redis binding shared by ipie-common-libs' cache.IpieCacheAutoConfiguration
+    // (@Cacheable/@CacheEvict/@CachePut CacheManager) and session.SessionAutoConfiguration
+    // (idle-session "stay logged in?" SessionStore) - deliberately declared here, not bundled by
+    // ipie-common-libs itself (which only depends on this compileOnly): a service that never adds
+    // this starter never gets RedisConnectionFactory on its classpath at all, so both
+    // auto-configurations simply fall back to their non-Redis default (a no-op CacheManager, an
+    // in-memory single-JVM SessionStore) instead of activating. Only activates the Redis-backed
+    // path when spring.data.redis.host is also configured - falls back cleanly without it, e.g. a
+    // bare `./gradlew bootJar && java -jar`. See ipie-common-libs/README.md's `cache`/`session`
+    // sections for the full precedence.
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // Concrete Elasticsearch binding for the UserSearchIndex port (see UserSearchIndexConfig).
+    // Only activates when spring.elasticsearch.uris is actually configured - the service still
+    // runs (falling back to Postgres-backed search via JpaUserSearchIndex) without a cluster
+    // present, e.g. a bare `./gradlew bootJar && java -jar`.
+    implementation 'org.springframework.boot:spring-boot-starter-data-elasticsearch'
+
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui'
+
+    implementation 'org.mapstruct:mapstruct'
+    annotationProcessor 'org.mapstruct:mapstruct-processor'
+    // Fixes processor ordering wherever a class carries both Lombok and MapStruct annotations -
+    // without it, MapStruct can run before Lombok generates accessors and silently map nothing.
+    annotationProcessor 'org.projectlombok:lombok-mapstruct-binding'
+
+    // Concrete Kafka binding for the EventPublisher port (master standards doc, section 9).
+    // Only activates when spring.kafka.bootstrap-servers is actually configured - see
+    // EventPublisherConfig - so the service still runs (falling back to LoggingEventPublisher)
+    // without a broker present, e.g. a bare `./gradlew bootJar && java -jar`.
+    implementation 'org.springframework.kafka:spring-kafka'
+
+    // Standby RabbitMQ binding for the same EventPublisher port, in case Kafka doesn't get
+    // organizational clearance - only activates when spring.rabbitmq.host is configured (see
+    // EventPublisherConfig / RabbitConsumerConfig), mutually exclusive with the Kafka binding
+    // above, never both active at once.
+    implementation 'org.springframework.boot:spring-boot-starter-amqp'
+
+    testImplementation testFixtures("in.gov.ipie:ipie-common-libs:${ipiePlatform}")
+    testImplementation 'org.springframework.security:spring-security-test'
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
+}
+
